@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useCallback, useState } from "react";
 import {
     Dimensions,
     StatusBar,
@@ -9,78 +9,59 @@ import {
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import Animated, {
     Easing,
-    useAnimatedReaction,
+    runOnJS,
     useAnimatedStyle,
     useSharedValue,
     withTiming,
 } from "react-native-reanimated";
 
+// আপনার কম্পোনেন্ট ইমপোর্টগুলো ঠিক রাখুন
 import { DotsIndicator } from "@/src/components/onboarding/DotsIndicator";
 import { GradientButton } from "@/src/components/onboarding/GradientButton";
 import { SlideContent } from "@/src/components/onboarding/SlideContent";
 import { slides } from "@/src/components/onboarding/Slides";
 
 const { width } = Dimensions.get("window");
-const SWIPE_THRESHOLD = width * 0.25;
-const DURATION = 350;
+const SWIPE_THRESHOLD = width * 0.2;
+const DURATION = 300;
 const TOTAL = slides.length;
 
 export default function OnboardingScreen() {
-  // JS state — only used for rendering bottom controls & dots
   const [currentIndex, setCurrentIndex] = useState(0);
-
-  // UI-thread shared values
   const translateX = useSharedValue(0);
-  const activeIndex = useSharedValue(0); // mirrors currentIndex on the UI thread
+  const startX = useSharedValue(0);
 
-  // ─── Sync UI-thread index → JS state (no runOnJS needed) ─────────────────
-  useAnimatedReaction(
-    () => activeIndex.value,
-    (next, prev) => {
-      if (next !== prev) {
-        // This callback automatically runs on the JS thread
-        setCurrentIndex(next);
-      }
-    },
-  );
+  // JS Thread এ স্টেট আপডেট করার ফাংশন
+  const updateIndex = (nextIndex: number) => {
+    setCurrentIndex(nextIndex);
+  };
 
-  // ─── Core animate helper (runs on JS thread) ──────────────────────────────
-  const animateTo = (nextIndex: number) => {
+  // এনিমেশন এবং স্টেট ম্যানেজমেন্ট ফাংশন
+  const animateTo = useCallback((nextIndex: number) => {
     if (nextIndex < 0 || nextIndex >= TOTAL) return;
-    activeIndex.value = nextIndex; // triggers reaction above
+
+    // ১. স্টেট আপডেট (JS Thread)
+    updateIndex(nextIndex);
+
+    // ২. এনিমেশন রান করা (UI Thread)
     translateX.value = withTiming(-nextIndex * width, {
       duration: DURATION,
       easing: Easing.out(Easing.cubic),
     });
-  };
+  }, []);
 
-  // ─── Button handlers ──────────────────────────────────────────────────────
-  const goNext = () => {
-    if (currentIndex < TOTAL - 1) animateTo(currentIndex + 1);
-    else console.log("Onboarding complete!");
-  };
-
-  const handleSecondary = () => {
-    if (currentIndex === 0) {
-      animateTo(TOTAL - 1); // Skip intro → jump to last
-    } else if (currentIndex === TOTAL - 1) {
-      console.log("Skipped permissions"); // "Not Now"
-    } else {
-      animateTo(currentIndex - 1);
-    }
-  };
-
-  // ─── Swipe gesture (fully on UI thread — no JS calls needed) ─────────────
-  const startX = useSharedValue(0);
-
+  // Gesture Logic
   const panGesture = Gesture.Pan()
     .onStart(() => {
+      "worklet";
       startX.value = translateX.value;
     })
     .onUpdate((e) => {
+      "worklet";
       const proposed = startX.value + e.translationX;
+      // স্ক্রিনের বাইরে ড্র্যাগ করা আটকানো (Bouncing effect check)
       const minVal = -(TOTAL - 1) * width;
-      translateX.value = Math.max(minVal, Math.min(0, proposed));
+      translateX.value = Math.max(minVal - 50, Math.min(50, proposed));
     })
     .onEnd((e) => {
       "worklet";
@@ -88,31 +69,37 @@ export default function OnboardingScreen() {
         e.translationX < -SWIPE_THRESHOLD || e.velocityX < -500;
       const swipedRight = e.translationX > SWIPE_THRESHOLD || e.velocityX > 500;
 
-      let next = activeIndex.value;
-      if (swipedLeft) next = Math.min(activeIndex.value + 1, TOTAL - 1);
-      else if (swipedRight) next = Math.max(activeIndex.value - 1, 0);
+      // বর্তমান ইনডেক্স ক্যালকুলেশন (translateX থেকে)
+      const currentIndexUI = Math.round(Math.abs(startX.value / width));
+      let next = currentIndexUI;
 
-      // Mutate shared values directly — useAnimatedReaction syncs to JS state
-      activeIndex.value = next;
+      if (swipedLeft && currentIndexUI < TOTAL - 1) {
+        next = currentIndexUI + 1;
+      } else if (swipedRight && currentIndexUI > 0) {
+        next = currentIndexUI - 1;
+      }
+
+      // এনিমেশন রান করা
       translateX.value = withTiming(-next * width, {
         duration: DURATION,
         easing: Easing.out(Easing.cubic),
       });
-    })
-    .runOnJS(false); // explicit: keep entirely on UI thread
 
-  // ─── Animated strip style ─────────────────────────────────────────────────
+      // JS State আপডেট করা
+      runOnJS(updateIndex)(next);
+    });
+
   const stripStyle = useAnimatedStyle(() => ({
     transform: [{ translateX: translateX.value }],
   }));
 
-  const slide = slides[currentIndex];
+  // প্যানিক চেক: স্লাইড যেন undefined না হয়
+  const slide = slides[currentIndex] || slides[0];
 
   return (
     <View className="flex-1 bg-[#F0F9FF]">
-      <StatusBar barStyle="dark-content" backgroundColor="#F0F9FF" />
+      <StatusBar barStyle="dark-content" />
 
-      {/* Swipeable slides strip */}
       <GestureDetector gesture={panGesture}>
         <Animated.View
           style={[
@@ -121,24 +108,32 @@ export default function OnboardingScreen() {
           ]}
         >
           {slides.map((s) => (
-            <SlideContent key={s.id} slide={s} />
+            <View key={s.id} style={{ width }}>
+              <SlideContent slide={s} />
+            </View>
           ))}
         </Animated.View>
       </GestureDetector>
 
-      {/* Bottom controls — fixed outside the animated strip */}
-      <View className="px-[5%] bg-[#F0F9FF]">
-        <GradientButton label={slide.primaryBtn} onPress={goNext} />
+      <View className="px-[5%] pb-10 bg-[#F0F9FF]">
+        <GradientButton
+          label={slide.primaryBtn}
+          onPress={() => animateTo(currentIndex + 1)}
+        />
 
         {slide.secondaryBtn && (
           <TouchableOpacity
-            onPress={handleSecondary}
+            onPress={() => {
+              if (currentIndex === 0) animateTo(TOTAL - 1);
+              else if (currentIndex === TOTAL - 1) console.log("Done");
+              else animateTo(currentIndex - 1);
+            }}
             activeOpacity={0.7}
             className="items-center py-3"
           >
             <Text
-              className="font-Inter_Medium"
               style={{
+                fontFamily: "Inter-Medium",
                 fontSize: 15,
                 color: slide.id === "5" ? "#0EA5E9" : "#9CA3AF",
               }}
